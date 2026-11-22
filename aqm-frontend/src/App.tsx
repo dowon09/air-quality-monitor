@@ -29,6 +29,7 @@ interface Reading {
 }
 
 const API_ROOT = (import.meta.env.VITE_API_URL || "http://localhost:8000/api").replace(/\/$/, "");
+const X_AXIS_TICK_COUNT = 7;
 const ranges = [
   { label: "1 hr", hours: 1 },
   { label: "24 hr", hours: 24 },
@@ -44,13 +45,13 @@ const chartMetrics = [
 type ChartMetric = typeof chartMetrics[number]["key"];
 
 function aqiStatus(value: number | null) {
-  if (value === null) return { label: "No reading", tone: "neutral" };
+  if (value === null) return { label: "Device Offline / No reading", tone: "neutral" };
   if (value == 1) return { label: "Excellent", tone: "good" };
   if (value == 2) return { label: "Good", tone: "good" };
   if (value == 3) return { label: "Moderate", tone: "sensitive" };
   if (value == 4) return { label: "Poor", tone: "unhealthy" };
   if (value == 5) return { label: "Very Poor", tone: "very-unhealthy" };
-  return { label: "No reading", tone: "neutral" };
+  return { label: "Device Offline / No reading", tone: "neutral" };
 }
 
 function formatTimestamp(timestamp: string) {
@@ -185,16 +186,27 @@ export default function App() {
     };
   }, []);
 
-  const status = aqiStatus(latest?.aqi ?? null);
   const lastSeenMs = latest ? Date.now() - parseTimestamp(latest.timestamp).getTime() : null;
   const isLive = lastSeenMs !== null && lastSeenMs < 300_000;
+  const status = isLive ? aqiStatus(latest?.aqi ?? null) : aqiStatus(null);
+  const range = ranges.find((item) => item.hours === hours) ?? ranges[0];
+  const now = Date.now();
+  const rangeStart = now - range.hours * 60 * 60 * 1000;
   const chartData = readings.map((reading) => ({
     ...reading,
     chartAqi: reading.aqi === null ? null : 6 - reading.aqi,
     chartTime: parseTimestamp(reading.timestamp).getTime(),
-  })).filter((reading) => reading.chartTime >= Date.now() - hours * 60 * 60 * 1000);
+  })).filter((reading) => reading.chartTime >= rangeStart);
   const selectedMetricConfig = chartMetrics.find((metric) => metric.key === selectedMetric) ?? chartMetrics[0];
   const metricChartData = chartData.filter((reading) => reading[selectedMetric] !== null);
+  const metricValues = metricChartData
+    .map((reading) => reading[selectedMetric])
+    .filter((value): value is number => value !== null);
+  const minimum = Math.min(...metricValues);
+  const maximum = Math.max(...metricValues);
+  const xAxisTicks = Array.from({ length: X_AXIS_TICK_COUNT }, (_, index) =>
+    rangeStart + ((now - rangeStart) * index) / (X_AXIS_TICK_COUNT - 1),
+  );
 
   return (
     <main className="page-shell">
@@ -230,8 +242,8 @@ export default function App() {
           <div className="metrics-grid">
             <MetricCard icon={Thermometer} label="Temperature" value={latest?.temperature == null ? "--" : latest.temperature.toFixed(1)} unit="°C" tone="coral" />
             <MetricCard icon={Droplets} label="Humidity" value={latest?.humidity == null ? "--" : latest.humidity.toFixed(0)} unit="%" tone="gold" />
-            <MetricCard icon={Cloud} label="TVOC" value={latest?.tvoc == null ? "--" : latest.tvoc.toFixed(0)} unit="ppb" tone="mint" description="Lower is generally better. Below about 500 ppb is often considered low; higher readings mean more airborne chemicals. There is no single safe cutoff." />
-            <MetricCard icon={Wind} label="eCO₂" value={latest?.eco2 == null ? "--" : latest.eco2.toFixed(0)} unit="ppm" tone="blue" description="Lower is generally better. Around 400–1,000 ppm is a common reference range; above 1,000 is elevated. This is an estimate, not a direct CO₂ reading." />
+            <MetricCard icon={Cloud} label="TVOC" value={latest?.tvoc == null ? "--" : latest.tvoc.toFixed(0)} unit="ppb" tone="mint" description="Approximate concentration of airborne chemical pollutants - lower is generally better. Below about 500 ppb is often considered low; higher readings mean more airborne chemicals. There is no single safe cutoff." />
+            <MetricCard icon={Wind} label="eCO₂" value={latest?.eco2 == null ? "--" : latest.eco2.toFixed(0)} unit="ppm" tone="blue" description="Estimate of indoor CO₂ - lower is generally better. Around 400–1,000 ppm is a common reference range; above 1,000 is elevated. This is an estimate, not a direct CO₂ reading." />
           </div>
         </section>
 
@@ -273,7 +285,7 @@ export default function App() {
           <div className="chart-wrap">
             {metricChartData.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={metricChartData} margin={{ top: 16, right: 12, left: -18, bottom: 0 }}>
+                <AreaChart data={metricChartData} margin={{ top: 16, right: 12, left: 8, bottom: 0 }}>
                   <defs>
                     <linearGradient id="metricFill" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="0%" stopColor="#2f8e73" stopOpacity={0.24} />
@@ -284,22 +296,38 @@ export default function App() {
                   <XAxis
                     dataKey="chartTime"
                     type="number"
-                    domain={["dataMin", "dataMax"]}
-                    tickFormatter={(time: number) => new Intl.DateTimeFormat(undefined, hours <= 24
-                      ? { hour: "numeric" }
-                      : { month: "short", day: "numeric" }).format(new Date(time))}
+                    domain={[rangeStart, now]}
+                    tickFormatter={(time: number) => {
+                      if (time === rangeStart) return "";
+
+                      if (hours === 1) {
+                        return new Intl.DateTimeFormat(undefined, {
+                          hour: "numeric",
+                          minute: "2-digit",
+                        }).format(new Date(time));
+                      }
+
+                      return new Intl.DateTimeFormat(undefined, hours === 24
+                        ? { hour: "numeric" }
+                        : { month: "short", day: "numeric" }).format(new Date(time));
+                    }}
                     axisLine={false}
                     tickLine={false}
                     tick={{ fill: "#8b958d", fontSize: 11 }}
-                    minTickGap={36}
+                    interval="preserveStartEnd"
+                    ticks={xAxisTicks}
                   />
                   <YAxis
-                    domain={selectedMetric === "aqi" ? [1, 5] : [0, "auto"]}
-                    tickFormatter={(value) => selectedMetric === "aqi" ? 6 - Number(value) : value}
+                    domain={selectedMetric === "aqi" ? [1, 5] : [minimum, maximum]}
+                    tickCount={selectedMetric === "aqi" ? 5 : undefined}
+                    allowDecimals={selectedMetric !== "aqi"}
+                    tickFormatter={(value) => selectedMetric === "aqi"
+                      ? aqiStatus(6 - Number(value)).label
+                      : value}
                     axisLine={false}
                     tickLine={false}
                     tick={{ fill: "#8b958d", fontSize: 11 }}
-                    width={42}
+                    width={ selectedMetric === "aqi" ? 80 : 60 }
                   />
                   <Tooltip
                     labelFormatter={(time) => formatTimestamp(new Date(Number(time)).toISOString())}
@@ -332,7 +360,7 @@ export default function App() {
               </div>
             )}
           </div>
-          <div className="chart-footnote"><span className="legend-dot" /> {selectedMetricConfig.label}{selectedMetricConfig.unit ? ` (${selectedMetricConfig.unit})` : ""} <span className="footnote-separator">·</span> refreshed every 30 seconds</div>
+          <div className="chart-footnote"><span className="legend-dot" /> {selectedMetricConfig.label}{selectedMetricConfig.unit ? ` (${selectedMetricConfig.unit})` : ""} <span className="footnote-separator">·</span></div>
         </section>
       </section>
     </main>
